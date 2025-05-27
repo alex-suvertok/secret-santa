@@ -6,8 +6,9 @@ class CoreConfig(AppConfig):
     name = 'core'
 
     def ready(self) -> None:
-        from core.models import User
+        from .models import User
         from fieldsignals import post_save_changed
         from .signals import change_member
 
+        # Connect the change_member signal to the User model's post_save_changed signal
         post_save_changed.connect(change_member, sender=User, fields=['email'])
