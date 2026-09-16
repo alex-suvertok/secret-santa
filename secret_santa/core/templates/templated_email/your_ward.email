@@ -1,4 +1,0 @@
-{% block subject %} Hello! This is Secret Santa by Alex Suvertok{% endblock %}
-{% block html %}
-  <h3>You have been chosen to be a secret santa for {{ recipient_name }}</h3>
-{% endblock %}

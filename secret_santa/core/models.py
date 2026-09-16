@@ -1,29 +1,32 @@
 import hashlib
-from random import choice
+import logging
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage
 from django.db import models
 from django.utils import timezone
 from model_utils import FieldTracker
-from templated_email import send_templated_mail
+
+from .assignment import AssignmentError, build_assignment
+
+logger = logging.getLogger(__name__)
 
 
 class User(AbstractUser):
     dob = models.DateField(verbose_name='Date of birth', null=True, blank=True)
 
     @property
-    def name(self):
-        # Construct user's name from first_name and last_name, fallback to email
+    def name(self) -> str:
         first_name = self.first_name
         last_name = self.last_name
 
         if first_name and last_name:
             return f'{first_name} {last_name}'
-        elif first_name:
+        if first_name:
             return first_name
-        elif last_name:
+        if last_name:
             return last_name
         return self.email
 
@@ -32,7 +35,6 @@ class User(AbstractUser):
 
 
 class Team(models.Model):
-    # Team name
     name = models.CharField(verbose_name='Name', max_length=255)
 
     def __str__(self) -> str:
@@ -40,162 +42,124 @@ class Team(models.Model):
 
 
 class Member(models.Model):
-    # Relation to team — many members per one team
     team = models.ForeignKey(Team, related_name='members', on_delete=models.CASCADE)
 
-    # Optional relation to User (if present)
     user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
-    # Name can be empty (null=True, blank=True)
     name = models.CharField('Name', max_length=255, null=True, blank=True)
-    # Email address (required)
     email_address = models.EmailField('Email address')
-    # Tracks changes in email_address for automatic hashed_email update
     email_address_tracker = FieldTracker(fields=['email_address'])
-    # Hashed email for privacy, stored in DB
-    hashed_email = models.CharField('Hashed recipient\'s email', max_length=32, null=True, blank=True)
+    hashed_email = models.CharField('Hashed recipient\'s email', max_length=64, null=True, blank=True)
 
-    # Many-to-many self-referential relation for colleagues within members
     colleagues = models.ManyToManyField('self', blank=True)
 
     def save(self, *args, **kwargs) -> None:
-        # If new record or email_address changed and no linked user — update hashed_email
-        if self.pk is None or (self.email_address_tracker.changed() and self.user is None):
-            # Generate hashed email
+        # Recompute the hash whenever a Member is first created or its email source changed
+        if self.pk is None or self.email_address_tracker.changed() or (self.user and self.user.email):
             self.hashed_email = self.get_hashed_email()
+        super().save(*args, **kwargs)
 
-        # Validation: must have either name or user linked, otherwise raise ValidationError
-        if self.name or self.user:
-            super().save(*args, **kwargs)
-        else:
-            raise ValidationError('The member must have a name or connection to the user')
+    def clean(self) -> None:
+        super().clean()
+        if not (self.name or self.user):
+            raise ValidationError("Учасник повинен мати ім'я або зв'язок з користувачем")
 
     def __str__(self) -> str:
-        # Return name or linked user's name if available
         return self.name or (self.user.name if self.user else '')
 
-    def get_hashed_email(self):
-        # Take email (user.email or email_address) and create MD5 hash with salt
-        email = self.email or ''
-        return hashlib.md5((email + settings.HASH_SALT).encode('utf-8')).hexdigest()
+    def get_hashed_email(self) -> str:
+        return hashlib.sha256((self.email + settings.HASH_SALT).encode('utf-8')).hexdigest()
 
     @property
     def email(self) -> str:
-        # Return user's email if linked, else email_address
         user = self.user
         return user.email if user else self.email_address
 
     @property
     def full_name(self) -> str:
-        # Same for full name
         user = self.user
         return user.name if user else self.name
 
 
 def mailing(santa, recipient_name) -> None:
+    from_email = settings.DEFAULT_FROM_EMAIL
     try:
-        # Send templated email with your_ward.email template
-        send_templated_mail(
-            template_name='your_ward.email',
-            recipient_list=[santa.email],
-            from_email=settings.TEMPLATED_EMAIL_FROM_EMAIL,
-            context=dict(recipient_name=recipient_name)
-        )
+        from des.models import DynamicEmailConfiguration
+        from_email = DynamicEmailConfiguration.get_solo().from_email or from_email
     except Exception:
-        # Silently ignore exceptions — logging is recommended
-        pass
+        logger.warning('Could not load DynamicEmailConfiguration, using DEFAULT_FROM_EMAIL', exc_info=True)
+
+    team_name = santa.team.name if santa.team else ''
+    subject = 'Привіт! Це Secret Santa від Alex Suvertok'
+    html_body = (
+        f'<p>Привіт, {santa.full_name}!</p>'
+        f'<p>Команда &quot;{team_name}&quot; грає в Secret Santa.</p>'
+        f'<h3>Вас обрано таємним Сантою для {recipient_name}</h3>'
+        f'<p>Приготуйте, будь ласка, подарунок для {recipient_name}. Успіхів!</p>'
+    )
+
+    message = EmailMessage(
+        subject=subject,
+        body=html_body,
+        from_email=from_email,
+        to=[santa.email],
+    )
+    message.content_subtype = 'html'
+    try:
+        message.send(fail_silently=settings.EMAIL_FAIL_SILENTLY)
+    except Exception:
+        logger.exception('Failed to send email to %s', santa.email)
 
 
 class Celebration(models.Model):
-    # Team celebrating New Year
     team = models.ForeignKey(Team, verbose_name='The team celebrating the new year', on_delete=models.CASCADE)
-    # Celebration year (must be greater than current year)
     year = models.PositiveSmallIntegerField(verbose_name='Next year')
 
     def __str__(self) -> str:
-        return f'{self.team} in {self.year}'
+        return f'{self.team} у {self.year}'
 
     class Meta:
-        # Unique pair team+year
         unique_together = ['team', 'year']
         ordering = ['year']
 
-    def save(self, **kwargs) -> None:
+    def clean(self) -> None:
+        super().clean()
         specified_year = self.year
         current_year = timezone.now().year
-
         if specified_year <= current_year:
             raise ValidationError(
-                f'Enter the next year. The specified year ({specified_year}) is less than the current year ({current_year})'
+                f'Введіть наступний рік. Вказаний рік ({specified_year}) менший або '
+                f'дорівнює поточному ({current_year})'
             )
-        return super().save(**kwargs)
 
-    def get_colleagues_count_dict(self, colleagues_dict):
-        # Return dict {member: number of colleagues}, sorted by number of colleagues
-        colleagues_count_dict = dict()
-        for key, value in colleagues_dict.items():
-            colleagues_count_dict[key] = len(value)
+    def save(self, *args, **kwargs) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
 
-        return dict(sorted(colleagues_count_dict.items(), key=lambda item: item[1]))
+    def run(self) -> None:
+        """Build the exchange, then persist and email — only after success.
 
-    def check_and_run(self):
-        flag = True
-        while flag:
-            try:
-                dict_for_mailing = dict()
-                list_for_create_secret_santa = list()
+        Raises AssignmentError (with a user-friendly message) when no valid
+        exchange exists; existing SecretSanta rows are left untouched then.
+        """
+        members = list(self.team.members.prefetch_related('colleagues'))
+        assignments = build_assignment(members)
 
-                # Build a dict of colleagues for each member
-                colleagues_dict = dict()
-                for member in self.team.members.prefetch_related('colleagues'):
-                    for colleague in member.colleagues.all():
-                        if member in colleagues_dict:
-                            colleagues_dict[member].append(colleague)
-                        else:
-                            colleagues_dict[member] = [colleague]
-
-                colleagues_count_dict = self.get_colleagues_count_dict(colleagues_dict)
-
-                # While there are members with colleagues — randomly assign a colleague as gift recipient
-                while colleagues_count_dict:
-                    member = list(colleagues_count_dict.keys())[0]
-                    colleague = choice(colleagues_dict[member])
-                    dict_for_mailing[member] = colleague.full_name
-                    list_for_create_secret_santa.append(SecretSanta(santa=member, recipient=colleague, celebration=self))
-
-                    # Remove assigned colleague and member from colleagues dict
-                    colleagues_dict.pop(member)
-                    for key, value in colleagues_dict.items():
-                        if colleague in value:
-                            value.remove(colleague)
-                            colleagues_dict[key] = value
-                    colleagues_count_dict = self.get_colleagues_count_dict(colleagues_dict)
-
-                # Bulk create SecretSanta records
-                SecretSanta.objects.bulk_create(list_for_create_secret_santa)
-
-                # Send emails to each Santa
-                for key, value in dict_for_mailing.items():
-                    mailing(key, value)
-
-                flag = False
-            except Exception:
-                # Empty except block — risk of infinite loop, logging errors is recommended
-                pass
-
-    def run(self):
-        # Clear previous records and run assignment algorithm
         self.clear()
-        self.check_and_run()
+        SecretSanta.objects.bulk_create([
+            SecretSanta(santa=santa, recipient=recipient, celebration=self)
+            for santa, recipient in assignments.items()
+        ])
 
-    def clear(self):
-        # Delete all SecretSanta records for this Celebration
+        for santa, recipient in assignments.items():
+            mailing(santa, recipient.full_name)
+
+    def clear(self) -> None:
         self.secret_santas.all().delete()
 
 
 class SecretSanta(models.Model):
-    # Each Santa has a unique recipient (OneToOne)
-    santa = models.OneToOneField(Member, verbose_name='Santa', related_name='me_santa', on_delete=models.CASCADE)
-    recipient = models.OneToOneField(
+    santa = models.ForeignKey(Member, verbose_name='Santa', related_name='me_santa', on_delete=models.CASCADE)
+    recipient = models.ForeignKey(
         Member, verbose_name='Recipient of a gift from Santa', related_name='my_santa', on_delete=models.CASCADE
     )
     celebration = models.ForeignKey(Celebration, related_name='secret_santas', on_delete=models.CASCADE)
@@ -204,8 +168,10 @@ class SecretSanta(models.Model):
         return f'{self.santa} {self.recipient} {self.celebration}'
 
     class Meta:
-        unique_together = ['santa', 'recipient', 'celebration']
+        unique_together = [
+            ('celebration', 'santa'),
+            ('celebration', 'recipient'),
+        ]
 
     def resend_email(self) -> None:
-        # Resend email for a specific Santa
-        mailing(self.santa, self.recipient.name)
+        mailing(self.santa, self.recipient.full_name)

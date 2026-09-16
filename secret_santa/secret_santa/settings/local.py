@@ -5,10 +5,8 @@ from .base import *  # noqa
 # https://docs.djangoproject.com/en/dev/ref/settings/#debug
 DEBUG = True
 # https://docs.djangoproject.com/en/dev/ref/settings/#secret-key
-SECRET_KEY = env(
-    "DJANGO_SECRET_KEY",
-    default="django-insecure-is*=&1c-#m1!+9fmaamnr*!5uou&uyc1ptgnq@xw3ui1sp)ak8",
-)
+# Required from .env — see .env.example. No hardcoded fallback.
+SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 # https://docs.djangoproject.com/en/dev/ref/settings/#allowed-hosts
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["0.0.0.0", "127.0.0.1"]) + ['localhost']
@@ -25,17 +23,10 @@ CACHES = {
 
 # EMAIL
 # ------------------------------------------------------------------------------
-# https://docs.djangoproject.com/en/dev/ref/settings/#email-host
-EMAIL_HOST = '127.0.0.1'
-EMAIL_HOST_USER = ''
-EMAIL_HOST_PASSWORD = ''
-# https://docs.djangoproject.com/en/dev/ref/settings/#email-port
-EMAIL_PORT = 1025
-EMAIL_USE_TLS = False
-# https://docs.djangoproject.com/en/dev/ref/settings/#email-backend
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-
-TEMPLATED_EMAIL_FROM_EMAIL = "Alex Suvertok <alex.suvertol@gmail.com>"
+# SMTP config lives in the DynamicEmailConfiguration singleton (admin panel).
+# The DES backend reads it from the DB — no need to restart the server on change.
+# For local dev, point the DynamicEmailConfiguration at Mailcatcher (127.0.0.1:1025).
+EMAIL_BACKEND = "des.backends.ConfiguredEmailBackend"
 
 # https://django-debug-toolbar.readthedocs.io/en/latest/installation.html#internal-ips
 INTERNAL_IPS = ["127.0.0.1", "10.0.2.2"]

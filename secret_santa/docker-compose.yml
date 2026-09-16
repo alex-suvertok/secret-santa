@@ -1,0 +1,42 @@
+# Docker Compose for the Secret Santa web app + PostgreSQL.
+#
+# Ports (host ports 8000/8080/5432 are used by other projects on this machine):
+#   - web:    http://localhost:8001
+#   - db:     localhost:5433 (inside the network it's db:5432)
+#
+# Secrets come from .env (gitignored) — see .env.example.
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: secret_santa
+      POSTGRES_USER: secret_santa
+      POSTGRES_PASSWORD: secret_santa
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secret_santa -d secret_santa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: ./secret_santa/.env
+    environment:
+      DJANGO_SETTINGS_MODULE: secret_santa.settings.production
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      DATABASE_URL: postgres://secret_santa:secret_santa@db:5432/secret_santa
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

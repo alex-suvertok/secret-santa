@@ -1,0 +1,26 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets & DB (never baked into the image; passed via env_file)
+.env
+db.sqlite3
+
+# Django
+staticfiles/
+local_settings.py
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+
+# Dev docs
+README.md
